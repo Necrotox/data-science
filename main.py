@@ -1,104 +1,133 @@
-import joblib
+import dill
 import pandas as pd
-
-from sklearn.pipeline import Pipeline
+import matplotlib.pyplot as plt
+import numpy as np
+from sklearn.compose import make_column_selector, ColumnTransformer
 from sklearn.impute import SimpleImputer
-from sklearn.model_selection import cross_val_score
-from sklearn.preprocessing import OneHotEncoder
-from sklearn.preprocessing import StandardScaler
-from sklearn.compose import ColumnTransformer
-
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, confusion_matrix, roc_auc_score, roc_curve, auc
+from sklearn.linear_model import LogisticRegression, LinearRegression
+from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
-import pickle
+from sklearn.naive_bayes import GaussianNB
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, FunctionTransformer
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.preprocessing import LabelEncoder
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.neural_network import MLPClassifier
+from sklearn.pipeline import Pipeline
+import time
 
-pickle_filename = "pickle-file_30.pickle"
+
+def session_prep(df: pd.DataFrame) -> pd.DataFrame:
+    import pandas as pd
+    df1 = pd.read_csv('data/ga_sessions.csv')
+    target = ['sub_car_claim_click', 'sub_car_claim_submit_click',
+              'sub_open_dialog_click', 'sub_custom_question_submit_click',
+              'sub_call_number_click', 'sub_callback_submit_click', 'sub_submit_success',
+              'sub_car_request_submit_click']
+    df1['client_do_target_action'] = df1['event_action'].apply(lambda x: 1 if x in target else 0)
+    df1 = df1.groupby1(['session_id'], as_index=False).agg({'client_do_target_action': 'max'})
+    df = pd.merge(df,df1, on='session_id', how='outer', sort=True)
+    df = df.drop(
+        ['client_id', 'session_id', 'Unnamed: 0', 'hit_page_path', 'visit_date', 'visit_time',
+         'hit_number', 'hit_type', 'event_action', 'event_category'], axis=1)
+    df = df.rename({'visit_number': 'count_of_action'}, axis=1)
+    df.utm_medium = df.utm_medium.replace({'(none)': '(not set)'})
+    return df
 
 
-def short_model(x):
-    if not pd.isna(x):
-        return x.lower().split(' ')[0]
-    else:
-        return x
+def Android_iOs_device_os_cange(df: pd.DataFrame) -> pd.DataFrame:
+    import numpy as np
+    list_for_android = list(df[df['device_os'] == 'Android'].device_brand.unique())
+    list_for_android.remove('(not set)')
+
+    list_for_iOS = list(df[df['device_os'] == 'iOS'].device_brand.unique())
+    list_for_iOS.remove('(not set)')
+
+    df['device_os'] = np.where((df['device_brand'].isin(list_for_iOS)) & (df['device_os'].isnull()), 'iOS', df['device_os'])
+    df['device_os'] = np.where((df['device_brand'].isin(list_for_android)) & (df['device_os'].isnull()), 'Android', df['device_os'])
+    df['device_os'] = np.where((df['device_os'].isnull()), '(not set)', df['device_os'])
+    return df
 
 
-def main():
-    columns_to_drop = [
-        'id',
-        'url',
-        'region',
-        'region_url',
-        'price',
-        'manufacturer',
-        'image_url',
-        'description',
-        'posting_date',
-        'lat',
-        'long'
-    ]
-    df = pd.read_csv('home/30.6 homework.csv')
+def LabelEcoder(df: pd.DataFrame) -> pd.DataFrame:
+    list1 = [i for i in df.columns if
+             (i.split('_')[0] in 'utm') or (i.split('_')[0] in 'device') or (i.split('_')[0] in 'geo')]
+    df[list1] = df[list1].apply(LabelEncoder().fit_transform)
+    return df
 
-    q25 = df['year'].quantile(0.25)
-    q75 = df['year'].quantile(0.75)
-    iqr = q75 - q25
-    boundaries = (q25 - 1.5 * iqr, q75 + 1.5 * iqr)
-    df.loc[df['year'] < boundaries[0], 'year'] = round(boundaries[0])
-    df.loc[df['year'] > boundaries[1], 'year'] = round(boundaries[1])
 
-    df['short_model'] = df.apply(short_model)
-    df['age_category'] = df['year'].apply(lambda x: 'new' if x > 2013 else ('old' if x < 2006 else 'average'))
+def prepare_for_ohe(df: pd.DataFrame) -> pd.DataFrame:
+    df[[i for i in df.columns if i != 'hit_time']] = df[[i for i in df.columns if i != 'hit_time']].apply(
+        lambda x: x.where(x.map(x.value_counts()) > 80))
+    return df
 
-    numerical = df.select_dtypes(include=['int64', 'float64']).columns
-    categorical = df.select_dtypes(include=['object']).columns
 
-    numerical_transformer = Pipeline(steps=[
-        ('imputer', SimpleImputer(strategy='median')),
-        ('scaler', StandardScaler())
-    ])
+def from_float_to_int(df: pd.DataFrame) -> pd.DataFrame:
+    for i in df.columns:
+        if df[i].dtype == 'float64':
+            df[i] = df[i].astype(int)
+    return df
+
+
+def make_standartScaler(df: pd.DataFrame) -> pd.DataFrame:
+    data_1 = df[['count_of_action', 'hit_time']]
+    std_scaler = StandardScaler()
+    std_scaler.fit(data_1)
+    std_scaled = std_scaler.transform(data_1)
+    list1 = ['count_of_action', 'hit_time']
+    list2 = []
+    for name in list1:
+        std_name = name + '_std'
+        list2.append(std_name)
+    df[list2] = std_scaled
+    return df
+
+
+def Pipline() -> None:
+    df = pd.read_cvs('data/ga_hits.csv')
+    df = df.merge(df, session_prep(pd.read_csv('data/ga_sessions.csv'), on='session_id', how='outer' ))
+
+    numerical_features = make_column_selector(dtype_include=['int64', 'float64'])
+    categorical_features = make_column_selector(dtype_include=object)
 
     categorical_transformer = Pipeline(steps=[
         ('imputer', SimpleImputer(strategy='most_frequent')),
         ('encoder', OneHotEncoder(handle_unknown='ignore'))
     ])
 
-    preprocessor = ColumnTransformer(transformers=[
-        ('numerical', numerical_transformer, numerical),
-        ('categorical', categorical_transformer, categorical)
+    numerical_transformer = Pipeline(steps=[
+        ('imputer', SimpleImputer(strategy='median')),
+        ('scaler', StandardScaler())
     ])
 
-    df_prep = df.copy()
+    column_transformer = ColumnTransformer(transformers=[
+        ('numerical', numerical_transformer, numerical_features),
+        ('categorical', categorical_transformer, categorical_features)
+    ])
 
-    df_prep.drop(columns_to_drop, axis=1)
-
-    X = df_prep.drop('price_category', axis=1)
-    y = df_prep['price_category']
-
-    models = (
-        LogisticRegression(solver='liblinear'),
-        RandomForestClassifier(),
-        SVC()
-    )
-
-    best_score = .0
-    best_pipe = None
-    for model in models:
-        pipe = Pipeline(steps=[
-            ('preprocessor', preprocessor),
-            ('classifier', model)
-        ])
-        score = cross_val_score(pipe, X, y, cv=4, scoring='accuracy')
-        print(f'model: {type(model).__name__}, acc_mean: {score.mean():.4f}, acc_std: {score.std():.4f}')
-
-        if score.mean() > best_score:
-            best_score = score.mean()
-            best_pipe = pipe
-    print(f'best model: {type(best_pipe.named_steps["classifier"]).__name__}, accuracy: {best_score:.4f}')
-    joblib.dump(best_pipe, 'loan_pipe.pkl')
-
-    with open(pickle_filename, 'wb') as file:
-        pickle.dump(best_pipe, file)
+    preprocessor = Pipeline(steps=[
+        ('concat_with_sessions', FunctionTransformer(session_prep)),
+        ('change_os-names', FunctionTransformer(Android_iOs_device_os_cange)),
+        ('delete_low_count_categories', FunctionTransformer(prepare_for_ohe)),
+        ('column_transformer', column_transformer)
+    ])
 
 
+
+
+
+
+
+
+def print_hi(name):
+    # Use a breakpoint in the code line below to debug your script.
+    print(f'Hi, {name}')  # Press Ctrl+F8 to toggle the breakpoint.
+
+
+# Press the green button in the gutter to run the script.
 if __name__ == '__main__':
-    main()
+    print_hi('PyCharm')
+
+# See PyCharm help at https://www.jetbrains.com/help/pycharm/
